@@ -67,7 +67,7 @@ export default function Sidebar({ activeTab, setActiveTab }: SidebarProps) {
           </div>
           <div className="flex-1 min-w-0 flex items-center justify-between">
             <div className="truncate pr-2">
-              <div className="text-sm font-bold text-slate-900 truncate">{user?.name || 'Admin Panel'}</div>
+              <div className="text-sm font-bold text-slate-900 truncate">{user?.user_metadata?.name || 'Admin Panel'}</div>
               <div className="text-xs text-slate-500 truncate">{user?.email || 'admin@example.com'}</div>
             </div>
             <ChevronDown className={`w-4 h-4 shrink-0 text-slate-400 transition-transform ${showAdminMenu ? 'rotate-180' : ''}`} />

@@ -19,7 +19,7 @@ function AppContent() {
     );
   }
 
-  return user ? <DashboardLayout /> : <AuthPage />;
+  return user ? <DashboardLayout key={user.id} /> : <AuthPage />;
 }
 
 export default function App() {
