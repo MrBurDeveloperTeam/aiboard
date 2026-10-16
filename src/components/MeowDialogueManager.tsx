@@ -8,7 +8,7 @@ import { useCat } from '../store/catStore';
 const PET_STATES: PetState[] = ['Normal', 'Hungry', 'Unhappy', 'Dirty', 'Low Energy', 'Audio'];
 
 export default function MeowDialogueManager() {
-  const { meowConfig, updateMeowConfig } = useStore();
+  const { meowConfig, updateMeowConfig, meowReady, meowSaveStatus, meowSaveError, retryMeowSave, reloadMeowConfig } = useStore();
   const [activeState, setActiveState] = useState<PetState>('Normal');
   
   // Edit & Add State
@@ -240,8 +240,17 @@ export default function MeowDialogueManager() {
   return (
     <div className="h-full overflow-hidden p-6 bg-slate-50/30 flex flex-col min-h-0">
       
+      <div className="max-w-4xl mx-auto w-full mb-3 text-sm" role="status" aria-live="polite">
+        {meowSaveStatus === 'saving' ? 'Saving…' : meowSaveStatus === 'loading' ? 'Loading saved dialogue…' : meowSaveStatus === 'saved' ? 'All changes saved' : meowSaveError}
+        {meowSaveStatus === 'error' && <>
+          {meowReady && <button className="ml-3 underline" onClick={() => void retryMeowSave()}>Retry save</button>}
+          <button className="ml-3 underline" onClick={() => {
+            if (window.confirm('Discard unsaved changes and reload saved dialogue?')) void reloadMeowConfig();
+          }}>Discard and reload</button>
+        </>}
+      </div>
       {/* Editor Panel */}
-      <div className="max-w-4xl mx-auto w-full flex-1 flex flex-col min-h-0 bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
+      <div inert={!meowReady} className="max-w-4xl mx-auto w-full flex-1 flex flex-col min-h-0 bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
         
         {/* Header & Tabs */}
         <div className="bg-white border-b border-slate-100 shrink-0 z-20 shadow-sm relative">

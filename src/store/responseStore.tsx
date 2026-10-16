@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
 import { AIResponse, SimulatorConfig, MeowDialogueConfig, PetState } from '../types';
 import { supabase } from '../lib/supabase';
+import { createMeowSaver } from '../lib/persistMeowChanges.mjs';
 import { MODULES, DEFAULT_MEOW_CONFIG, DEFAULT_SIMULATOR_CONFIG, seedUserDefaults } from '../lib/seedDefaults';
 import { CurrencyCode, Currency, ALL_AVAILABLE_CURRENCIES, CURRENCIES as DEFAULT_CURRENCIES, Item, INITIAL_ITEMS, CategoryId } from './pricingData';
 
@@ -20,6 +21,11 @@ interface StoreContextType {
   modules: string[];
   meowConfig: MeowDialogueConfig;
   updateMeowConfig: (updates: Partial<MeowDialogueConfig>) => Promise<void>;
+  meowSaveStatus: string;
+  meowReady: boolean;
+  meowSaveError: string;
+  retryMeowSave: () => Promise<void>;
+  reloadMeowConfig: () => Promise<void>;
   pricingCurrencies: Record<CurrencyCode, Currency>;
   updatePricingCurrencies: (currencies: Record<CurrencyCode, Currency>) => Promise<void>;
   pricingItems: Item[];
@@ -101,11 +107,11 @@ function rowToMeowConfig(row: any): MeowDialogueConfig {
   };
 
   return {
-    Normal:       getMsgs('Normal').length ? getMsgs('Normal') : DEFAULT_MEOW_CONFIG.Normal,
-    Hungry:       getMsgs('Hungry').length ? getMsgs('Hungry') : DEFAULT_MEOW_CONFIG.Hungry,
-    Unhappy:      getMsgs('Unhappy').length ? getMsgs('Unhappy') : DEFAULT_MEOW_CONFIG.Unhappy,
-    Dirty:        getMsgs('Dirty').length ? getMsgs('Dirty') : DEFAULT_MEOW_CONFIG.Dirty,
-    'Low Energy': getMsgs('Low Energy').length ? getMsgs('Low Energy') : DEFAULT_MEOW_CONFIG['Low Energy'],
+    Normal:       getMsgs('Normal'),
+    Hungry:       getMsgs('Hungry'),
+    Unhappy:      getMsgs('Unhappy'),
+    Dirty:        getMsgs('Dirty'),
+    'Low Energy': getMsgs('Low Energy'),
     Audio:        getMsgs('Audio').length ? getMsgs('Audio') : [],
     timingConfigs: {
       Normal: getTiming('Normal'),
@@ -130,6 +136,17 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [activeModule, setActiveModuleState] = useState<string>(MODULES[0]);
   const [isLoading, setIsLoading] = useState(true);
 
+  const meowSaver = useRef<ReturnType<typeof createMeowSaver> | null>(null);
+  const meowConfigRef = useRef(meowConfig);
+  const [meowSaveStatus, setMeowSaveStatus] = useState("loading");
+  const [meowSaveError, setMeowSaveError] = useState("");
+  useEffect(() => {
+    if (meowSaveStatus !== 'saving' && meowSaveStatus !== 'error') return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [meowSaveStatus]);
+
   // ── Auth: get current session ──────────────────────────────────────────────
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
@@ -147,6 +164,13 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   // ── Load data once we have a userId ───────────────────────────────────────
   useEffect(() => {
+    let cancelled = false;
+    void meowSaver.current?.dispose();
+    meowSaver.current = null;
+    setMeowSaveStatus("loading");
+    setMeowSaveError("");
+    meowConfigRef.current = DEFAULT_MEOW_CONFIG;
+    setMeowConfig(DEFAULT_MEOW_CONFIG);
     if (!userId) {
       setIsLoading(false);
       return;
@@ -187,6 +211,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           .eq('user_id', userId),
       ]);
 
+      if (cancelled) return;
       if (respResult.data) setResponses(respResult.data.map(rowToAIResponse));
 
       if (simResult.data) {
@@ -197,7 +222,18 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         setSimulatorConfigs(configs);
       }
 
-      if (meowResult.data) setMeowConfig(rowToMeowConfig(meowResult.data));
+      if (meowResult.data && !meowResult.error) {
+        const loaded = rowToMeowConfig(meowResult.data);
+        meowConfigRef.current = loaded;
+        setMeowConfig(loaded);
+        meowSaver.current = createMeowSaver(supabase, userId, meowResult.data, loaded, (status, error) => {
+          if (!cancelled) { setMeowSaveStatus(status); setMeowSaveError(error); }
+        });
+        setMeowSaveStatus('saved');
+      } else {
+        setMeowSaveStatus('error');
+        setMeowSaveError('Could not load saved dialogue. Reload before editing.');
+      }
 
       if (pricingResult && pricingResult.data && pricingResult.data.length > 0) {
         const curMap: Record<CurrencyCode, Currency> = {};
@@ -212,7 +248,10 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
 
       setIsLoading(false);
-    })();
+    })().catch(() => {
+      if (!cancelled) { setIsLoading(false); setMeowSaveStatus('error'); setMeowSaveError('Could not load saved dialogue. Please reload.'); }
+    });
+    return () => { cancelled = true; void meowSaver.current?.dispose(); meowSaver.current = null; };
   }, [userId]);
 
   // ── Computed simulator config for the active module ────────────────────────
@@ -358,91 +397,18 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }, [userId, activeModule, simulatorConfigs]);
 
   // ── Meow Config ───────────────────────────────────────────────────────────
-  // Tracks the latest merged config synchronously (unlike React state, a ref
-  // updates immediately), so back-to-back calls — e.g. every keystroke in the
-  // timing inputs — always merge on top of the freshest value instead of a
-  // stale closure from before the previous call's setState landed.
-  const meowConfigRef = useRef(meowConfig);
-  useEffect(() => { meowConfigRef.current = meowConfig; }, [meowConfig]);
-
-  const updateMeowTimeout = useRef<NodeJS.Timeout | null>(null);
-
   const updateMeowConfig = useCallback(async (updates: Partial<MeowDialogueConfig>) => {
-    if (!userId) return;
+    if (!userId || !meowSaver.current) return;
     const merged = { ...meowConfigRef.current, ...updates };
-
-    // Optimistic update
     meowConfigRef.current = merged;
     setMeowConfig(merged);
-
-    // Debounce the actual persistence: coalesce rapid-fire calls (e.g. typing
-    // in the timing inputs) into a single delete+insert cycle using the
-    // latest merged state, instead of letting multiple overlapping
-    // delete-then-insert calls race and duplicate or drop rows.
-    if (updateMeowTimeout.current) clearTimeout(updateMeowTimeout.current);
-    updateMeowTimeout.current = setTimeout(async () => {
-      const latest = meowConfigRef.current;
-
-      const { data: meowData } = await supabase
-        .from('aiboard_meow_configs')
-        .upsert({ user_id: userId }, { onConflict: 'user_id' })
-        .select()
-        .single();
-
-      if (meowData) {
-        await supabase.from('aiboard_meow_messages').delete().eq('config_id', meowData.id);
-        await supabase.from('aiboard_meow_timing').delete().eq('config_id', meowData.id);
-
-        const states = ['Normal', 'Hungry', 'Unhappy', 'Dirty', 'Low Energy', 'Audio'] as const;
-        const messagesToInsert: any[] = [];
-        const timingsToInsert: any[] = [];
-
-        for (const state of states) {
-          const msgs = latest[state] as string[];
-          if (msgs) {
-            msgs.forEach((msg, i) => {
-              const isAudio = state === 'Audio';
-              let msgText = msg;
-              let audioName = null;
-              if (isAudio) {
-                 try {
-                   const parsed = JSON.parse(msg);
-                   msgText = parsed.url;
-                   audioName = parsed.name;
-                 } catch (e) { }
-              }
-              messagesToInsert.push({
-                config_id: meowData.id,
-                state: state,
-                message: msgText,
-                is_audio: isAudio,
-                audio_name: audioName,
-                sort_order: i
-              });
-            });
-          }
-
-          const timing = latest.timingConfigs[state];
-          if (timing) {
-            timingsToInsert.push({
-              config_id: meowData.id,
-              state: state,
-              message_duration_minutes: timing.messageDurationMinutes,
-              message_interval_minutes: timing.messageIntervalMinutes,
-              disabled: timing.disabled || false
-            });
-          }
-        }
-
-        if (messagesToInsert.length > 0) {
-          await supabase.from('aiboard_meow_messages').insert(messagesToInsert);
-        }
-        if (timingsToInsert.length > 0) {
-          await supabase.from('aiboard_meow_timing').insert(timingsToInsert);
-        }
-      }
-    }, 500);
+    meowSaver.current.update(merged);
   }, [userId]);
+  const retryMeowSave = useCallback(async () => { await meowSaver.current?.retry(); }, []);
+  const reloadMeowConfig = useCallback(async () => {
+    // Full reload disposes the queue and reloads the authenticated baseline.
+    window.location.reload();
+  }, []);
 
   // ── Pricing Currencies ────────────────────────────────────────────────────
   const updatePricingCurrenciesTimeout = useRef<NodeJS.Timeout | null>(null);
@@ -510,7 +476,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       responses, addResponse, updateResponse, deleteResponse,
       simulatorConfig, updateSimulatorConfig,
       activeModule, setActiveModule, modules: MODULES,
-      meowConfig, updateMeowConfig,
+      meowConfig, updateMeowConfig, meowSaveStatus, meowSaveError, retryMeowSave, reloadMeowConfig,
+      meowReady: !!meowSaver.current,
       pricingCurrencies, updatePricingCurrencies,
       pricingItems, updatePricingItems,
       isLoading,

@@ -54,7 +54,7 @@ function RateRow({ currency, onRateChange, onRemove, onClick, isActive }: RateRo
             onKeyDown={(e) => {
               if (e.key === 'Enter') {
                 handleBlur();
-                e.target.blur();
+                e.currentTarget.blur();
               }
             }}
           />
